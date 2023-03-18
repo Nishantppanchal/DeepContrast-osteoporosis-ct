@@ -15,6 +15,10 @@ if __name__ == '__main__':
         help = 'Specify the body part ("HeadNeck" or "Chest") to run inference.'
         )
     parser.add_argument(
+        '--data_dir',
+        type = str,
+        )
+    parser.add_argument(
         '-v',
         '--save_csv',
         required = False,
@@ -25,7 +29,7 @@ if __name__ == '__main__':
     
     proj_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
     model_dir = os.path.join(proj_dir, 'models')
-    data_dir = os.path.join(proj_dir, 'datasets') 
+    data_dir = args.data_dir
 
     print('\n--- MODEL INFERENCE ---\n')
     
