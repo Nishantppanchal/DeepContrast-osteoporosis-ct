@@ -2,13 +2,13 @@ import re
 import sqlite3
 import pandas as pd
 import os
-import enum
+from enum import Enum
 import shutil
 import subprocess
 import numpy as np
 
 
-class idTypes(enum):
+class idTypes(Enum):
     # Subject tbl
     SUBJECT_ID = 0
     STUDY_INSTANCE_UID = 1
@@ -137,7 +137,8 @@ if __name__ == "__main__":
         os.makedirs(TEMP_DIR)
 
     db = HeadCTData(DB_DIR, DICOM_DIR)
-
+    
+    db.BMD_tbl_Test_df["Contrast"] = np.nan
     for i, row in db.BMD_tbl_Test_df.iterrows():
         seriesInstanceUid = row[str(idTypes.SERIES_INSTANCE_UID)]
         
@@ -148,28 +149,29 @@ if __name__ == "__main__":
         convert_to_nrrd(
             {
                 "input": str(os.path.abspath(TEMP_DIR)),
-                "output-img": str(os.path.abspath(os.path.join(TEMP_DIR, f"temp-{seriesInstanceUid}.nrrd"))),
+                "output-img": str(os.path.abspath(os.path.join(TEMP_DIR, f"temp.nrrd"))),
                 "algorithm": "itk",
             }
         )
 
-    subprocess.call(
-        (
-            "python",
-            "run_inference.py",
-            "--body_part",
-            "HeadNeck",
-            "--data_dir",
-            str(os.path.abspath(TEMP_DIR)),
-            "--save_csv",
+        subprocess.call(
+            (
+                "python",
+                "run_inference.py",
+                "--body_part",
+                "HeadNeck",
+                "--data_dir",
+                str(os.path.abspath(TEMP_DIR)),
+                "--save_csv",
+            )
         )
-    )
 
-    predictionsDf = pd.read_csv("./patient_prediction.csv")
-    db.BMD_tbl_Test_df["Contrast"] = np.nan
-    for _, row in predictionsDf.iterrows():
-        seriesInstanceUid = re.search("temp-(.*).nnrd", row["pat_id"]).group(1)
-        db.BMD_tbl_Test_df[db.BMD_tbl_Test_df[str(idTypes.SERIES_INSTANCE_UID)]["Contrast"] == seriesInstanceUid] = row["predictions"]
+        predictionsDf = pd.read_csv("./patient_prediction.csv")
+        
+        db.BMD_tbl_Test_df["Contrast"] = predictionsDf.iloc[0]["predictions"]
+        
+        os.remove(os.path.abspath(os.path.join(TEMP_DIR, f"temp.nrrd")))
+        os.remove("./patient_prediction.csv")
         
     db.BMD_tbl_Test_df.to_csv("./test_df_with_contrast.csv")
         
