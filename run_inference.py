@@ -27,7 +27,8 @@ if __name__ == '__main__':
         )
     args = parser.parse_args()
     
-    proj_dir = os.path.abspath(os.path.join(os.getcwd(), os.pardir))
+    proj_dir = os.path.abspath(os.getcwd())
+    print(proj_dir)
     model_dir = os.path.join(proj_dir, 'models')
     data_dir = args.data_dir
 
