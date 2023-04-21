@@ -2,39 +2,12 @@ import re
 import sqlite3
 import pandas as pd
 import os
-from enum import Enum
 import shutil
 import subprocess
 import numpy as np
 import pydicom
+import nrrd
 
-class HeadCTData:
-    def __init__(self, dbDir, dicomDir) -> None:
-        self.dicom_dir = dicomDir
-
-        connection = sqlite3.connect(dbDir)
-        self.BMD_tbl_Image_df = pd.read_sql_query("SELECT * FROM BMD_tbl_Image", connection)
-        self.BMD_tbl_Subject_df = pd.read_sql_query("SELECT * FROM BMD_tbl_Subject", connection)
-        self.BMD_tbl_Test_df = pd.read_sql_query("SELECT * FROM BMD_tbl_Test", connection)
-
-    def get_image_path(self, subject_id, sop_instance_uid):
-        return os.path.join(
-            self.dicom_dir,
-            subject_id,
-            f"{sop_instance_uid}.dcm",
-        )
-
-    def get_test_image_paths(self, subject_id, series_instance_uid):
-        return [
-            self.get_image_path(subject_id, row["SOPInstanceUID"])
-            for _, row in self.BMD_tbl_Image_df[
-                self.BMD_tbl_Image_df["SeriesInstanceUID"] == series_instance_uid
-            ].iterrows()
-        ]
-    
-    def get_series(self, study_instance_uid):
-        return self.BMD_tbl_Test_df[self.BMD_tbl_Test_df["StudyInstanceUID"] == study_instance_uid]
-    
 # Takes in DICOM image returns orientation
 def check_orientation(ct_scan): 
     image_ori = ct_scan.ImageOrientationPatient
@@ -56,58 +29,62 @@ if __name__ == "__main__":
     TEMP_DIR = r"./temp"
     DB_DIR = r"/nfs/MBSI/Osteoporosis/Head-CT/DB_filtered/BoneDensity_2023-03-01_10 - deid.db"
     DICOM_DIR = r"/nfs/MBSI/Osteoporosis/Head-CT/DICOM_filtered/"
+    FAILED_CT_LOG = r"./failed_ct_log.txt"
     
     if os.path.exists(TEMP_DIR):
         shutil.rmtree(os.path.abspath(TEMP_DIR))
     
     print("Reading DB")
-    db = HeadCTData(DB_DIR, DICOM_DIR)
+    
+    connection = sqlite3.connect(DB_DIR)
+    BMD_tbl_Image_df = pd.read_sql_query("SELECT * FROM BMD_tbl_Image", connection)
+    BMD_tbl_Subject_df = pd.read_sql_query("SELECT * FROM BMD_tbl_Subject", connection)
+    # BMD_tbl_Test_df = pd.read_csv("./axial_scans.csv")[["StudyInstanceUID", "SeriesInstanceUID"]]   
+    BMD_tbl_Test_df = pd.read_sql_query("SELECT * FROM BMD_tbl_Test", connection)[["StudyInstanceUID", "SeriesInstanceUID"]]
+    
+    db = pd.merge(left=BMD_tbl_Subject_df, right=BMD_tbl_Test_df, on="StudyInstanceUID")
+    db = pd.merge(left=db, right=BMD_tbl_Image_df[["SeriesInstanceUID", "SOPInstanceUID", "InstanceNumber"]], on="SeriesInstanceUID")
+    db = db[["SubjectID", "StudyInstanceUID", "SeriesInstanceUID", "SOPInstanceUID", "InstanceNumber"]]
+    db["Path"] = DICOM_DIR + db["SubjectID"] + "/" + db["SOPInstanceUID"] + ".dcm"
+    db = db.groupby(["SubjectID", "StudyInstanceUID", "SeriesInstanceUID"])[["Path", "InstanceNumber"]].agg(list).reset_index()
     
     print("Starting loop")
-    db.BMD_tbl_Test_df["Contrast"] = np.nan
-    for i, subject_row in db.BMD_tbl_Subject_df.iterrows():
-        
-        subject_id = subject_row["SubjectID"]
-        study_instance_uid = subject_row["StudyInstanceUID"]
-        series = db.get_series(study_instance_uid)
-        
-        for j, series_row in series.iterrows():
-            print("-"*150)
+    db["Contrast"] = np.nan
+    db["Non-axial detected"] = False
+    total = len(db.index)
+    for i, row in db.iterrows():
+        try:
+            print(f"{'-'*70}| i = {i+1}/{total} |{'-'*70}")
+
             if not os.path.exists(TEMP_DIR):
                 os.makedirs(TEMP_DIR)
             if len(os.listdir(TEMP_DIR)) != 0: # Safety check
                 shutil.rmtree(os.path.abspath(TEMP_DIR))
-                os.makedirs(TEMP_DIR)
-            
-            series_instance_uid = series_row["SeriesInstanceUID"]
-            paths = db.get_test_image_paths(subject_id, series_instance_uid)
+                os.makedirs(TEMP_DIR) 
+            if os.path.exists("./patient_prediction.csv"): # Safety check
+                os.remove("./patient_prediction.csv")
 
+            slices = []
             # Check to ensure that ct scan is axial
-            not_axial_flag = False
-            for path in paths:
-                if check_orientation(pydicom.dcmread(path)) != "axial":
-                    not_axial_flag = True
-            if not_axial_flag:
-                print("Not axial")
+            for path, instance_number in zip(row["Path"], row["InstanceNumber"]):
+                s = pydicom.dcmread(path)
+                if check_orientation(s) != "axial":
+                    print(f"Not axial: SeriesInstanceUID: {row['SeriesInstanceUID']} | InstanceNumber: {instance_number}")
+                    db.at[i, "Non-axial detected"] = True
+                    # break
+                else:
+                    s.InstanceNumber = instance_number
+                    slices.append(s)
+                    
+            # if len(slices) < len(row["Path"]):
+            if len(slices) == 0:
+                print("Skipped: no slices")
                 continue
-
-
-            for path in paths:
-                shutil.copy(path, os.path.abspath(TEMP_DIR))
-
-            subprocess.call(
-                (
-                    "plastimatch",
-                    "convert",
-                    "--input", 
-                    str(os.path.abspath(TEMP_DIR)),
-                    "--output-img", 
-                    str(os.path.abspath(os.path.join(TEMP_DIR, f"temp.nrrd"))),
-                    "--algorithm", 
-                    "itk",
-                )
-            )
-
+                    
+            slices = sorted(slices, key=lambda s: s.InstanceNumber, reverse=True)
+            nrrd.write("./temp/temp.nrrd", np.stack([s.pixel_array for s in slices], axis=2))
+            # input("")
+            
             subprocess.call(
                 (
                     "python",
@@ -121,14 +98,28 @@ if __name__ == "__main__":
                 )
             )
 
-            predictionsDf = pd.read_csv("./patient_prediction.csv")
+            predictions_df = pd.read_csv("./patient_prediction.csv")
 
-            db.BMD_tbl_Test_df["Contrast"] = predictionsDf.iloc[0]["predictions"]
-            print(f"Prediction {i}-{j}: {predictionsDf.iloc[0]['predictions']}")
+            db.at[i, "Contrast"] = predictions_df.iloc[0]["predictions"]
+            print(f"Prediction: {predictions_df.iloc[0]['predictions']}")
 
+            # input("")
             shutil.rmtree(os.path.abspath(TEMP_DIR))
             os.remove("./patient_prediction.csv")
+        except Exception as e:
+            db.at[i, "Contrast"] = -1 # Meaning it failed
+
+            with open(FAILED_CT_LOG, "a") as f:
+                f.writelines([
+                    f"{'-'*200}\n", 
+                    f"CT index: i={i}\n", 
+                    f"Subject ID: {row['SubjectID']}\n", 
+                    f"Series instance UID {row['SeriesInstanceUID']}\n", 
+                    "ERROR:", f"\t{e}\n",
+                ])
+
+                
             
-    db.BMD_tbl_Test_df.to_csv("./test_df_with_contrast.csv")
+    db.to_csv("./test_df_with_contrast.csv")
     os.remove("./image_prediction.csv")
     print("Complete")
